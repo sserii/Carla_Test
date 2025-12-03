@@ -51,15 +51,16 @@ class DijkstraPathGenerator(Node):
         
         # [설정] 시작점과 도착점
         self.start_tf = spawn_points[0]
-        self.goal_tf = spawn_points[100] 
+        # 가까운 거리 테스트: 50, 150 등
+        self.goal_tf = spawn_points[161] 
 
-        self.get_logger().info(f"Start: ({self.start_tf.location.x:.2f}, {self.start_tf.location.y:.2f})")
-        self.get_logger().info(f"Goal : ({self.goal_tf.location.x:.2f}, {self.goal_tf.location.y:.2f})")
+        self.get_logger().info(f"Start (Abs): ({self.start_tf.location.x:.2f}, {self.start_tf.location.y:.2f})")
+        self.get_logger().info(f"Goal (Abs) : ({self.goal_tf.location.x:.2f}, {self.goal_tf.location.y:.2f})")
 
-        self.generate_topology_path()
+        self.generate_relative_path()
 
-    def generate_topology_path(self):
-        self.get_logger().info("Calculating Global Route using CARLA Topology...")
+    def generate_relative_path(self):
+        self.get_logger().info("Calculating Global Route & Converting to Relative Coordinates...")
         
         grp = GlobalRoutePlanner(self.map, sampling_resolution=1.0)
         route = grp.trace_route(self.start_tf.location, self.goal_tf.location)
@@ -70,47 +71,74 @@ class DijkstraPathGenerator(Node):
 
         self.get_logger().info(f"Path Found! Length: {len(route)} waypoints")
 
-        rx, ry = [], []
+        # 1. 절대 좌표(Absolute) 추출
+        abs_rx, abs_ry = [], []
         for waypoint, road_option in route:
-            rx.append(waypoint.transform.location.x)
-            ry.append(waypoint.transform.location.y)
+            abs_rx.append(waypoint.transform.location.x)
+            abs_ry.append(waypoint.transform.location.y)
 
-        # CSV 저장 (원본 좌표 그대로 저장 - 주행용)
+        # 2. [핵심] 상대 좌표(Relative)로 변환 (Start를 0,0으로 만듦)
+        start_x = abs_rx[0]
+        start_y = abs_ry[0]
+
+        rel_rx = []
+        rel_ry = []
+
+        for x, y in zip(abs_rx, abs_ry):
+            rel_rx.append(x - start_x)
+            rel_ry.append(y - start_y)
+
+        # 3. CSV 저장 (상대 좌표 저장)
         filename = "global_path.csv"
         file_path = os.path.join(os.getcwd(), filename)
 
         with open(file_path, "w") as f:
-            for x, y in zip(rx, ry):
+            for x, y in zip(rel_rx, rel_ry):
                 f.write(f"{x},{y}\n") 
         
-        self.get_logger().info(f"Path saved to {file_path}")
+        self.get_logger().info(f"Relative Path saved to {file_path}")
+        self.get_logger().info(f"Path Starts at: ({rel_rx[0]:.1f}, {rel_ry[0]:.1f})")
 
-        # [수정됨] 시각화 (X축 좌우 반전 적용)
+        # 4. 시각화 (전체 맵 포함 + 상대 좌표 기준)
         if os.environ.get('DISPLAY', '') != '':
             try:
+                self.get_logger().info("Preparing Visualization...")
+                
+                # [추가] 전체 맵(Topology)도 상대 좌표로 변환해서 그리기
                 topology = self.map.get_topology()
-                ox, oy = [], []
+                map_x, map_y = [], []
+                
                 for wp1, wp2 in topology:
-                    l1, l2 = wp1.transform.location, wp2.transform.location
-                    ox.append(l1.x); oy.append(l1.y)
-                    ox.append(l2.x); oy.append(l2.y)
-                    ox.append(None); oy.append(None)
+                    l1 = wp1.transform.location
+                    l2 = wp2.transform.location
+                    
+                    # 맵 좌표도 시작점을 빼서 평행이동 시킴
+                    map_x.append(l1.x - start_x)
+                    map_y.append(l1.y - start_y)
+                    map_x.append(l2.x - start_x)
+                    map_y.append(l2.y - start_y)
+                    
+                    # 선을 끊어서 그리기 위해 None 삽입
+                    map_x.append(None)
+                    map_y.append(None)
 
                 plt.figure(figsize=(10,10))
                 
-                # 1. 맵과 경로 그리기
-                plt.plot(ox, oy, "k-", linewidth=0.5, alpha=0.5, label="Roads")
-                plt.plot(self.start_tf.location.x, self.start_tf.location.y, "og", markersize=10, label="Start")
-                plt.plot(self.goal_tf.location.x, self.goal_tf.location.y, "xb", markersize=10, label="Goal")
-                plt.plot(rx, ry, "-r", linewidth=2, label="Legal Path")
+                # 전체 도로망 그리기 (회색)
+                plt.plot(map_x, map_y, "k-", linewidth=0.5, alpha=0.3, label="Roads (Relative)")
                 
-                # 2. [핵심 수정] X축을 반전시킴 (좌우 반전 효과)
+                # 경로 그리기 (빨간색)
+                plt.plot(rel_rx, rel_ry, "-r", linewidth=2, label="Relative Path")
+                plt.plot(rel_rx[0], rel_ry[0], "og", markersize=10, label="Start (0,0)")
+                plt.plot(rel_rx[-1], rel_ry[-1], "xb", markersize=10, label="Goal")
+                
+                # [선택] X축 반전 (CARLA 화면과 좌우를 맞추기 위함)
                 plt.gca().invert_xaxis() 
 
                 plt.grid(True)
                 plt.axis("equal")
                 plt.legend()
-                plt.title("CARLA Topology Path (X-axis Inverted View)")
+                plt.title("Full Map & Path (Relative Coordinates)")
                 plt.show()
             except Exception as e:
                 self.get_logger().warn(f"Plot failed: {e}")
